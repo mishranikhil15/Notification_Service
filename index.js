@@ -1,4 +1,3 @@
-// Core request type
 class NotificationRequest {
     constructor(userId, channels, templateId, params) {
         this.userId = userId;
@@ -8,8 +7,8 @@ class NotificationRequest {
     }
 }
 
-// RateLimiter
-class RateLimiter {
+// Rate limiter per user 1 request every 5 seconds
+class PerUserRateLimiter {
     constructor(limitDurationMs) {
         this.limitDurationMs = limitDurationMs;
         this.userTimestamps = new Map();
@@ -18,18 +17,37 @@ class RateLimiter {
     isAllowed(userId) {
         const currentTime = Date.now();
         const lastTime = this.userTimestamps.get(userId) || 0;
+        // console.log(`User: ${userId}, Current Time: ${currentTime}, Last Time: ${lastTime}`);
 
         if (currentTime - lastTime >= this.limitDurationMs) {
             this.userTimestamps.set(userId, currentTime);
             return true;
-        } else {
-            return false;
         }
+        return false;
+    }
+}
+
+// Global rate limiter to process 10 users every 5 seconds
+class GlobalRateLimiter {
+    constructor(limitCount, limitDurationMs) {
+        this.limitCount = limitCount;
+        this.limitDurationMs = limitDurationMs;
+        this.timestamps = [];
+    }
+
+    isAllowed() {
+        const currentTimeInMili = Date.now();
+        this.timestamps = this.timestamps.filter(ts => currentTimeInMili - ts < this.limitDurationMs);
+
+        if (this.timestamps.length < this.limitCount) {
+            this.timestamps.push(currentTimeInMili);
+            return true;
+        }
+        return false;
     }
 }
 
 // Message Queue
-
 class MessageQueue {
     constructor() {
         this.queue = [];
@@ -39,17 +57,68 @@ class MessageQueue {
         this.queue.push(message);
     }
 
-    consume(callback) {
-        setInterval(() => {
-            if (this.queue.length > 0) {
-                const msg = this.queue.shift();
-                callback(msg);
+    consume(callback, globalLimiter) {
+        setInterval(async () => {
+            if (this.queue.length === 0) return;
+
+            for (let i = 0; i < this.queue.length; i++) {
+                const request = this.queue[i];
+
+                if (!globalLimiter.isAllowed()) {
+                    console.log(`Delaying request from ${request.userId} due to global rate limit.`);
+                    continue;
+                }
+
+                this.queue.splice(i, 1);
+                await callback(request);
+                break;
             }
-        }, 5000);
+        }, 200);
     }
 }
 
-// Main NotificationService
+class EmailService {
+    async send(userId, message) {
+        console.log(`Sending EMAIL to ${userId}: ${message}`);
+    }
+}
+
+class SMSService {
+    async send(userId, message) {
+        console.log(`Sending SMS to ${userId}: ${message}`);
+    }
+}
+
+class PushService {
+    async send(userId, message) {
+        console.log(`Sending PUSH to ${userId}: ${message}`);
+    }
+}
+
+class InAppService {
+    async send(userId, message) {
+        console.log(`Storing IN-APP notification for ${userId}: ${message}`);
+    }
+}
+
+class TemplateService {
+    async render(templateId, params) {
+        switch (templateId) {
+            case 'WELCOME':
+                return `Hello ${params.name}, welcome to our service!`;
+            case 'PASSWORD_RESET':
+                return `Hi ${params.name}, click here to reset your password: ${params.resetLink}`;
+            case 'ORDER_CONFIRMATION':
+                return `Dear ${params.name}, your order #${params.orderId} has been confirmed!`;
+            case 'SUBSCRIPTION_RENEWAL':
+                return `Hello ${params.name}, your subscription will renew on ${params.renewalDate}.`;
+            default:
+                return `Hello ${params.name}, we have an update for you.`;
+        }
+    }
+}
+
+// NotificationService
 class NotificationService {
     constructor(emailService, smsService, pushService, inAppService, templateService) {
         this.emailService = emailService;
@@ -83,64 +152,15 @@ class NotificationService {
             } catch (error) {
                 console.error(`Error sending notification via ${channel}:`, error);
             }
-
         }
 
         return 'notification_id_123';
     }
 }
 
-class TemplateService {
-    async render(templateId, params) {
-        switch (templateId) {
-            case 'WELCOME':
-                return `Hello ${params.name}, welcome to our service!`;
-
-            case 'PASSWORD_RESET':
-                return `Hi ${params.name}, click here to reset your password: ${params.resetLink}`;
-
-            case 'ORDER_CONFIRMATION':
-                return `Dear ${params.name}, your order #${params.orderId} has been confirmed!`;
-
-            case 'SUBSCRIPTION_RENEWAL':
-                return `Hello ${params.name}, your subscription will renew on ${params.renewalDate}.`;
-
-            default:
-                return `Hello ${params.name}, we have an update for you.`;
-        }
-    }
-}
-
-
-class EmailService {
-    // Use nodemailer or any other service + ses
-    async send(userId, message) {
-        console.log(`Sending EMAIL to ${userId}: ${message}`);
-    }
-}
-
-class SMSService {
-    //Use twilio or any other service
-    async send(userId, message) {
-        console.log(`Sending SMS to ${userId}: ${message}`);
-    }
-}
-
-class PushService {
-    async send(userId, message) {
-        console.log(`Sending PUSH notification to ${userId}: ${message}`);
-    }
-}
-
-class InAppService {
-    async send(userId, message) {
-        console.log(`Storing IN-APP notification for ${userId}: ${message}`);
-    }
-}
-
-// Instantiate services and queue
-const messageQueue = new MessageQueue();
-const rateLimiter = new RateLimiter(5000);
+const queue = new MessageQueue();
+const perUserLimiter = new PerUserRateLimiter(3000);
+const globalLimiter = new GlobalRateLimiter(10, 5000);
 
 const service = new NotificationService(
     new EmailService(),
@@ -150,43 +170,28 @@ const service = new NotificationService(
     new TemplateService()
 );
 
+queue.consume(async (request) => {
+    await service.sendNotification(request);
+    console.log('Notification sent for', request.userId);
+}, globalLimiter);
+
 function apiGateway(reqBody) {
     const { userId, channel, templateId, params } = reqBody;
-
-    if (!rateLimiter.isAllowed(userId)) {
-        console.log('Too many requests. Please wait before trying again.');
+    if (!perUserLimiter.isAllowed(userId)) {
+        console.log(`Too many requests from ${userId}. Request rejected at API gateway.`);
         return;
     }
-
     const request = new NotificationRequest(userId, channel, templateId, params);
-    messageQueue.publish(request);
-    console.log('Request queued');
+    queue.publish(request);
+    console.log('Request queued for', userId);
 }
 
-// Worker consuming from queue
-messageQueue.consume(async (request) => {
-    await service.sendNotification(request);
-    console.log('Notification sent from worker');
-});
-
-// Simulated API call
-// apiGateway({
-//     userId: 'user123',
-//     channel: ['email', 'sms'],
-//     templateId: 'welcome_msg',
-//     params: { name: 'John' }
-// });
-
-
-for (let i = 0; i < 5; i++) {
+for (let i = 0; i < 15; i++) {
+    const userId = `user${i}`;
     apiGateway({
-        userId: 'user123',
+        userId,
         channel: ['email', 'sms', 'push', 'inapp'],
-        templateId: 'welcome_msg',
-        params: { name: 'John' }
+        templateId: 'WELCOME',
+        params: { name: `User${i}` }
     });
-
 }
-
-
-// Client --> API Gateway --> Message Queue (notifications) --> Worker --> NotificationService
