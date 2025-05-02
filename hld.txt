@@ -1,0 +1,104 @@
+==========================
+Notification Service - High-Level Design (HLD)
+==========================
+
+1. COMPONENTS
+--------------------------
+
+📌 API Gateway:
+- Entry point for incoming requests.
+- Applies the PerUserRateLimiter to reject requests exceeding the per-user rate limit.
+- Publishes valid requests to the MessageQueue.
+
+📌 MessageQueue:
+- Stores incoming requests in a queue.
+- Processes requests using the consume method.
+- Applies the GlobalRateLimiter to ensure no more than 10 requests are processed globally within 5 seconds.
+
+📌 Rate Limiters:
+  🔹 PerUserRateLimiter:
+  - Ensures a user can only make one request every 3 seconds.
+
+  🔹 GlobalRateLimiter:
+  - Ensures no more than 10 requests are processed globally within a 5-second window.
+
+📌 NotificationService:
+- Processes requests from the queue.
+- Sends notifications via multiple channels (email, SMS, push, in-app).
+- Uses the TemplateService to render notification content.
+
+📌 TemplateService:
+- Renders notification templates based on the templateId and params.
+
+📌 Notification Channels:
+  🔹 EmailService: Sends email notifications.
+  🔹 SMSService: Sends SMS notifications.
+  🔹 PushService: Sends push notifications.
+  🔹 InAppService: Stores in-app notifications.
+
+
+2. FLOW
+--------------------------
+
+🔄 Request Handling:
+- Requests are sent to the `apiGateway` function.
+- The `PerUserRateLimiter` checks if the request exceeds the per-user rate limit.
+- Valid requests are added to the `MessageQueue`.
+
+🔄 Queue Processing:
+- The `consume` method processes requests from the queue every 200ms.
+- The `GlobalRateLimiter` ensures no more than 10 requests are processed globally within 5 seconds.
+- Allowed requests are passed to the `NotificationService`.
+
+🔄 Notification Processing:
+- The `NotificationService` renders the notification content using the `TemplateService`.
+- The notification is sent via the specified channels (email, SMS, push, in-app).
+
+
+3. KEY DESIGN DECISIONS
+--------------------------
+
+✅ Rate Limiting:
+- The `PerUserRateLimiter` ensures fairness by limiting requests from individual users.
+- The `GlobalRateLimiter` ensures system-wide stability by throttling the total number of requests processed globally.
+
+✅ Queue-Based Processing:
+- Requests are queued to handle bursts of traffic and ensure orderly processing.
+
+✅ Extensibility:
+- The system is designed to support additional notification channels by extending the `NotificationService`.
+
+                       +--------------------+
+                       |     API Gateway    |
+                       +--------------------+
+                                |
+                                |  (Check PerUserRateLimiter)
+                                v
+                       +--------------------+
+                       |    Message Queue   |
+                       +--------------------+
+                                |
+                                |  (consume every 200ms)
+                                v
+                       +--------------------+
+                       | GlobalRateLimiter  |
+                       +--------------------+
+                                |
+                                v
+                       +-------------------------+
+                       |   Notification Service  |
+                       +-------------------------+
+                                |
+        +-----------+----------+-----------+------------+
+        |           |                      |            |
+        v           v                      v            v
++----------------+  +------------------+  +-----------+ +---------------+
+|  Email Service |  |   SMS Service    |  | Push      | | In-App        |
+|                |  |                  |  | Service   | | Notification  |
++----------------+  +------------------+  +-----------+ +---------------+
+
+                       ^
+                       |
+            +------------------------+
+            |    Template Service    |
+            +------------------------+
